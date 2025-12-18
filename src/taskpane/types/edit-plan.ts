@@ -33,7 +33,22 @@ export interface UpdateHeadingStyleAction {
   style: BlockStyle;
 }
 
-export type EditAction = ReplaceSectionAction | UpdateHeadingStyleAction;
+export interface CorrectTextAction {
+  type: "correct_text";
+  search_text: string;
+  replacement_text: string;
+  case_sensitive?: boolean;
+}
+
+export interface InsertTextAction {
+  type: "insert_text";
+  anchor: string;
+  location: "start" | "end" | "after_heading";
+  heading_text?: string; // Required when location is "after_heading"
+  blocks: Block[];
+}
+
+export type EditAction = ReplaceSectionAction | UpdateHeadingStyleAction | CorrectTextAction | InsertTextAction;
 
 export interface EditPlan {
   version: "1.0";

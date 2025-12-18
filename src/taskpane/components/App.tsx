@@ -49,8 +49,8 @@ const App: React.FC = () => {
     setPreview(null);
 
     try {
-      // Call API to generate EditPlan
-      const result = await generateEditPlan(prompt);
+      // Call API to generate EditPlan with conversation history for context
+      const result = await generateEditPlan(prompt, messages);
 
       if (!result.ok) {
         // Show error message

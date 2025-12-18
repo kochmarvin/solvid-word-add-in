@@ -38,16 +38,87 @@ export interface EditPlanApiError {
 export type EditPlanResult = EditPlanApiResponse | EditPlanApiError;
 
 /**
- * Calls the backend API to generate an EditPlan from a user prompt
+ * Reads document structure (headings and content) for context awareness
  */
-export async function generateEditPlan(prompt: string): Promise<EditPlanResult> {
+async function getDocumentContext(): Promise<{ 
+  headings: Array<{ text: string; level: number }>;
+  content_summary: string;
+  has_content: boolean;
+}> {
+  if (typeof Word === "undefined") {
+    return { headings: [], content_summary: "", has_content: false };
+  }
+
   try {
+    return await Word.run(async (context) => {
+      const body = context.document.body;
+      const paragraphs = body.paragraphs;
+      paragraphs.load("items");
+      await context.sync();
+
+      const headings: Array<{ text: string; level: number }> = [];
+      const contentPieces: string[] = [];
+      let hasContent = false;
+
+      for (let i = 0; i < paragraphs.items.length; i++) {
+        const para = paragraphs.items[i];
+        para.load("style,text");
+        await context.sync();
+
+        const style = para.style;
+        const text = para.text.trim();
+        
+        if (style === "Heading 1" || style === "Heading 2" || style === "Heading 3") {
+          const level = style === "Heading 1" ? 1 : style === "Heading 2" ? 2 : 3;
+          headings.push({
+            text,
+            level,
+          });
+        } else if (text.length > 0) {
+          // Collect paragraph content (first 200 chars of each paragraph for context)
+          contentPieces.push(text.substring(0, 200));
+          hasContent = true;
+        }
+      }
+
+      // Create a summary of document content (first few paragraphs)
+      const contentSummary = contentPieces.slice(0, 5).join(" ").substring(0, 1000);
+
+      return { 
+        headings,
+        content_summary: contentSummary,
+        has_content: hasContent || headings.length > 0
+      };
+    });
+  } catch (error) {
+    console.error("Error reading document context:", error);
+    return { headings: [], content_summary: "", has_content: false };
+  }
+}
+
+/**
+ * Calls the backend API to generate an EditPlan from a user prompt
+ * @param prompt - The user's prompt/request
+ * @param conversationHistory - Optional conversation history for context
+ */
+export async function generateEditPlan(
+  prompt: string,
+  conversationHistory?: Array<{ role: "user" | "ai"; content: string }>
+): Promise<EditPlanResult> {
+  try {
+    // Get document context (headings) for content awareness
+    const documentContext = await getDocumentContext();
+
     const response = await fetch(`${API_BASE_URL}/api/generate-edit-plan`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ prompt }),
+      body: JSON.stringify({ 
+        prompt,
+        conversation_history: conversationHistory || [],
+        document_context: documentContext
+      }),
     });
 
     if (!response.ok) {

@@ -7,6 +7,8 @@ import {
   Block,
   ParagraphBlock,
   HeadingBlock,
+  CorrectTextAction,
+  InsertTextAction,
 } from "../types/edit-plan";
 import { ValidationError } from "./errors";
 
@@ -130,6 +132,65 @@ function validateUpdateHeadingStyleAction(action: Extract<EditAction, { type: "u
 }
 
 /**
+ * Validates an insert_text action
+ */
+function validateInsertTextAction(action: InsertTextAction): void {
+  if (!action.anchor || typeof action.anchor !== "string" || action.anchor.trim() === "") {
+    throw new ValidationError("insert_text action must have a non-empty anchor string");
+  }
+  if (action.location !== "start" && action.location !== "end" && action.location !== "after_heading") {
+    throw new ValidationError('insert_text action location must be "start", "end", or "after_heading"');
+  }
+  if (action.location === "after_heading") {
+    if (!action.heading_text || typeof action.heading_text !== "string" || action.heading_text.trim() === "") {
+      throw new ValidationError("insert_text action must have heading_text when location is 'after_heading'");
+    }
+  }
+  if (!Array.isArray(action.blocks)) {
+    throw new ValidationError("insert_text action must have a blocks array");
+  }
+  if (action.blocks.length === 0) {
+    throw new ValidationError("insert_text action must have at least one block");
+  }
+  if (action.blocks.length > MAX_BLOCKS_PER_ACTION) {
+    throw new ValidationError(
+      `insert_text action exceeds maximum blocks per action (${MAX_BLOCKS_PER_ACTION})`
+    );
+  }
+  action.blocks.forEach((block, index) => {
+    validateBlock(block, index);
+  });
+}
+
+/**
+ * Validates a correct_text action
+ */
+function validateCorrectTextAction(action: CorrectTextAction): void {
+  if (!action.search_text || typeof action.search_text !== "string") {
+    throw new ValidationError("correct_text action must have a search_text string");
+  }
+  if (action.search_text.length === 0) {
+    throw new ValidationError("correct_text action search_text cannot be empty");
+  }
+  if (action.search_text.length > MAX_CHARACTERS_PER_TEXT) {
+    throw new ValidationError(
+      `correct_text action search_text exceeds maximum length (${MAX_CHARACTERS_PER_TEXT})`
+    );
+  }
+  if (action.replacement_text === undefined || typeof action.replacement_text !== "string") {
+    throw new ValidationError("correct_text action must have a replacement_text string");
+  }
+  if (action.replacement_text.length > MAX_CHARACTERS_PER_TEXT) {
+    throw new ValidationError(
+      `correct_text action replacement_text exceeds maximum length (${MAX_CHARACTERS_PER_TEXT})`
+    );
+  }
+  if (action.case_sensitive !== undefined && typeof action.case_sensitive !== "boolean") {
+    throw new ValidationError("correct_text action case_sensitive must be a boolean if provided");
+  }
+}
+
+/**
  * Validates an action
  */
 function validateAction(action: EditAction, index: number): void {
@@ -137,9 +198,13 @@ function validateAction(action: EditAction, index: number): void {
     validateReplaceSectionAction(action);
   } else if (action.type === "update_heading_style") {
     validateUpdateHeadingStyleAction(action);
+  } else if (action.type === "correct_text") {
+    validateCorrectTextAction(action);
+  } else if (action.type === "insert_text") {
+    validateInsertTextAction(action);
   } else {
     throw new ValidationError(
-      `Action at index ${index} has invalid type: ${(action as EditAction).type}. Only "replace_section" and "update_heading_style" are supported.`
+      `Action at index ${index} has invalid type: ${(action as EditAction).type}. Only "replace_section", "update_heading_style", "correct_text", and "insert_text" are supported.`
     );
   }
 }
