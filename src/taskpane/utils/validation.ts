@@ -55,6 +55,19 @@ function validateParagraphBlock(block: ParagraphBlock, index: number): void {
       `Paragraph block at index ${index} contains newline characters. Paragraphs must be single blocks.`
     );
   }
+  if (block.style?.color && !isValidColor(block.style.color)) {
+    throw new ValidationError(
+      `Paragraph block at index ${index} has invalid color format: ${block.style.color}`
+    );
+  }
+  if (block.style?.alignment && !["left", "center", "right", "justify"].includes(block.style.alignment)) {
+    throw new ValidationError(
+      `Paragraph block at index ${index} has invalid alignment: ${block.style.alignment}`
+    );
+  }
+  if (block.style?.bold !== undefined && typeof block.style.bold !== "boolean") {
+    throw new ValidationError(`Paragraph block at index ${index} bold must be a boolean`);
+  }
 }
 
 /**
@@ -75,6 +88,14 @@ function validateHeadingBlock(block: HeadingBlock, index: number): void {
     throw new ValidationError(
       `Heading block at index ${index} has invalid color format: ${block.style.color}`
     );
+  }
+  if (block.style?.alignment && !["left", "center", "right", "justify"].includes(block.style.alignment)) {
+    throw new ValidationError(
+      `Heading block at index ${index} has invalid alignment: ${block.style.alignment}`
+    );
+  }
+  if (block.style?.bold !== undefined && typeof block.style.bold !== "boolean") {
+    throw new ValidationError(`Heading block at index ${index} bold must be a boolean`);
   }
 }
 
@@ -120,14 +141,46 @@ function validateReplaceSectionAction(action: Extract<EditAction, { type: "repla
  * Validates an update_heading_style action
  */
 function validateUpdateHeadingStyleAction(action: Extract<EditAction, { type: "update_heading_style" }>): void {
-  if (action.target !== "all") {
-    throw new ValidationError('update_heading_style action target must be "all"');
+  if (!["all", "specific"].includes(action.target)) {
+    throw new ValidationError('update_heading_style action target must be "all" or "specific"');
+  }
+  if (action.target === "specific") {
+    if (!action.heading_text || typeof action.heading_text !== "string" || action.heading_text.trim() === "") {
+      throw new ValidationError('update_heading_style action with target "specific" must have a non-empty heading_text');
+    }
   }
   if (!action.style || typeof action.style !== "object") {
     throw new ValidationError("update_heading_style action must have a style object");
   }
   if (action.style.color && !isValidColor(action.style.color)) {
     throw new ValidationError(`update_heading_style action has invalid color format: ${action.style.color}`);
+  }
+  if (action.style.alignment && !["left", "center", "right", "justify"].includes(action.style.alignment)) {
+    throw new ValidationError(`update_heading_style action has invalid alignment: ${action.style.alignment}`);
+  }
+  if (action.style.bold !== undefined && typeof action.style.bold !== "boolean") {
+    throw new ValidationError("update_heading_style action bold must be a boolean");
+  }
+}
+
+/**
+ * Validates an update_text_format action
+ */
+function validateUpdateTextFormatAction(action: Extract<EditAction, { type: "update_text_format" }>): void {
+  if (!["all", "headings", "paragraphs"].includes(action.target)) {
+    throw new ValidationError('update_text_format action target must be "all", "headings", or "paragraphs"');
+  }
+  if (!action.style || typeof action.style !== "object") {
+    throw new ValidationError("update_text_format action must have a style object");
+  }
+  if (action.style.color && !isValidColor(action.style.color)) {
+    throw new ValidationError(`update_text_format action has invalid color format: ${action.style.color}`);
+  }
+  if (action.style.alignment && !["left", "center", "right", "justify"].includes(action.style.alignment)) {
+    throw new ValidationError(`update_text_format action has invalid alignment: ${action.style.alignment}`);
+  }
+  if (action.style.bold !== undefined && typeof action.style.bold !== "boolean") {
+    throw new ValidationError("update_text_format action bold must be a boolean");
   }
 }
 
@@ -198,13 +251,15 @@ function validateAction(action: EditAction, index: number): void {
     validateReplaceSectionAction(action);
   } else if (action.type === "update_heading_style") {
     validateUpdateHeadingStyleAction(action);
+  } else if (action.type === "update_text_format") {
+    validateUpdateTextFormatAction(action);
   } else if (action.type === "correct_text") {
     validateCorrectTextAction(action);
   } else if (action.type === "insert_text") {
     validateInsertTextAction(action);
   } else {
     throw new ValidationError(
-      `Action at index ${index} has invalid type: ${(action as EditAction).type}. Only "replace_section", "update_heading_style", "correct_text", and "insert_text" are supported.`
+      `Action at index ${index} has invalid type: ${(action as EditAction).type}. Only "replace_section", "update_heading_style", "update_text_format", "correct_text", and "insert_text" are supported.`
     );
   }
 }

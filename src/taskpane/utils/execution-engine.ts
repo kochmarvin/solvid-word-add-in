@@ -7,9 +7,11 @@ import {
   EditPlan,
   ReplaceSectionAction,
   UpdateHeadingStyleAction,
+  UpdateTextFormatAction,
   CorrectTextAction,
   InsertTextAction,
   Block,
+  BlockStyle,
 } from "../types/edit-plan";
 import { ExecutionError, ExecutionResult, AnchorNotFoundError } from "./errors";
 import {
@@ -243,20 +245,14 @@ async function executeReplaceSection(action: ReplaceSectionAction): Promise<void
         if (block.type === "paragraph") {
           const para = currentRange.insertParagraph(block.text, insertLocation);
           para.style = "Normal";
+          applyBlockFormatting(para, block.style);
           currentRange = para.getRange();
           insertLocation = Word.InsertLocation.after;
         } else if (block.type === "heading") {
           const para = currentRange.insertParagraph(block.text, insertLocation);
           const headingStyle = `Heading ${block.level}`;
           para.style = headingStyle;
-
-          if (block.style?.color) {
-            const colorHex = block.style.color.startsWith("#")
-              ? block.style.color.substring(1)
-              : block.style.color;
-            para.font.color = colorHex;
-          }
-
+          applyBlockFormatting(para, block.style);
           currentRange = para.getRange();
           insertLocation = Word.InsertLocation.after;
         }
@@ -386,14 +382,7 @@ async function executeInsertText(action: InsertTextAction): Promise<void> {
           const para = currentRange.insertParagraph(block.text, insertLocation);
           const headingStyle = `Heading ${block.level}`;
           para.style = headingStyle;
-
-          if (block.style?.color) {
-            const colorHex = block.style.color.startsWith("#")
-              ? block.style.color.substring(1)
-              : block.style.color;
-            para.font.color = colorHex;
-          }
-
+          applyBlockFormatting(para, block.style);
           currentRange = para.getRange();
           insertLocation = Word.InsertLocation.after;
         }
@@ -459,6 +448,38 @@ async function executeCorrectText(action: CorrectTextAction): Promise<void> {
 }
 
 /**
+ * Helper function to apply formatting to a paragraph
+ * Must be called within a Word.run context
+ */
+function applyBlockFormatting(para: Word.Paragraph, style?: BlockStyle): void {
+  if (!style) return;
+
+  // Apply color
+  if (style.color) {
+    const colorHex = style.color.startsWith("#")
+      ? style.color.substring(1)
+      : style.color;
+    para.font.color = colorHex;
+  }
+
+  // Apply bold
+  if (style.bold !== undefined) {
+    para.font.bold = style.bold;
+  }
+
+  // Apply alignment
+  if (style.alignment) {
+    const alignmentMap: Record<string, Word.Alignment> = {
+      left: Word.Alignment.left,
+      center: Word.Alignment.centered,
+      right: Word.Alignment.right,
+      justify: Word.Alignment.justified,
+    };
+    para.alignment = alignmentMap[style.alignment] || Word.Alignment.left;
+  }
+}
+
+/**
  * Executes an update_heading_style action
  */
 async function executeUpdateHeadingStyle(action: UpdateHeadingStyleAction): Promise<void> {
@@ -468,13 +489,8 @@ async function executeUpdateHeadingStyle(action: UpdateHeadingStyleAction): Prom
       throw new ExecutionError("Word API is not available. Please ensure the add-in is running in Word.");
     }
 
-    if (action.target !== "all") {
-      throw new ExecutionError(`Unsupported target for update_heading_style: ${action.target}`);
-    }
-
-    if (!action.style.color) {
-      // No color to apply
-      return;
+    if (action.target === "specific" && !action.heading_text) {
+      throw new ExecutionError("heading_text is required when target is 'specific'");
     }
 
     await Word.run(async (context) => {
@@ -484,26 +500,81 @@ async function executeUpdateHeadingStyle(action: UpdateHeadingStyleAction): Prom
 
       const headingParagraphs: Word.Paragraph[] = [];
 
-      // Find all heading paragraphs
-      for (let i = 0; i < paragraphs.items.length; i++) {
-        const para = paragraphs.items[i];
-        para.load("style");
-        await context.sync();
+      if (action.target === "all") {
+        // Find all heading paragraphs
+        for (let i = 0; i < paragraphs.items.length; i++) {
+          const para = paragraphs.items[i];
+          para.load("style");
+          await context.sync();
 
-        const style = para.style;
-        if (style === "Heading 1" || style === "Heading 2" || style === "Heading 3") {
-          headingParagraphs.push(para);
+          const style = para.style;
+          if (style === "Heading 1" || style === "Heading 2" || style === "Heading 3") {
+            headingParagraphs.push(para);
+          }
+        }
+      } else {
+        // Find specific heading by text matching
+        const searchText = action.heading_text!.toLowerCase().trim();
+        let bestMatch: Word.Paragraph | null = null;
+        let bestMatchScore = 0;
+
+        for (let i = 0; i < paragraphs.items.length; i++) {
+          const para = paragraphs.items[i];
+          para.load("style,text");
+          await context.sync();
+
+          const style = para.style;
+          if (style === "Heading 1" || style === "Heading 2" || style === "Heading 3") {
+            const paraText = para.text.toLowerCase().trim();
+
+            // Exact match - highest priority
+            if (paraText === searchText) {
+              bestMatch = para;
+              bestMatchScore = 1.0;
+              break;
+            }
+
+            // Partial matching
+            let matchScore = 0;
+            if (paraText.includes(searchText)) {
+              matchScore = searchText.length / paraText.length;
+            } else if (searchText.includes(paraText)) {
+              matchScore = paraText.length / searchText.length * 0.5;
+            } else {
+              // Word-level matching
+              const searchWords = searchText.split(/\s+/);
+              const headingWords = paraText.split(/\s+/);
+              let wordMatches = 0;
+              for (const word of searchWords) {
+                if (word.length > 2 && headingWords.some(hw => hw.includes(word) || word.includes(hw))) {
+                  wordMatches++;
+                }
+              }
+              if (wordMatches > 0) {
+                matchScore = wordMatches / searchWords.length * 0.3;
+              }
+            }
+
+            if (matchScore > bestMatchScore) {
+              bestMatchScore = matchScore;
+              bestMatch = para;
+            }
+          }
+        }
+
+        if (bestMatch && bestMatchScore > 0.1) {
+          headingParagraphs.push(bestMatch);
+        } else {
+          throw new ExecutionError(
+            `Heading not found: "${action.heading_text}". Please check the heading text and try again.`
+          );
         }
       }
 
-      // Apply color to all headings
+      // Apply formatting to target headings
       if (headingParagraphs.length > 0) {
-        const colorHex = action.style.color.startsWith("#")
-          ? action.style.color.substring(1)
-          : action.style.color;
-
         headingParagraphs.forEach((heading) => {
-          heading.font.color = colorHex;
+          applyBlockFormatting(heading, action.style);
         });
 
         await context.sync();
@@ -518,6 +589,59 @@ async function executeUpdateHeadingStyle(action: UpdateHeadingStyleAction): Prom
 }
 
 /**
+ * Executes an update_text_format action
+ */
+async function executeUpdateTextFormat(action: UpdateTextFormatAction): Promise<void> {
+  try {
+    // Check if Word API is available
+    if (typeof Word === "undefined") {
+      throw new ExecutionError("Word API is not available. Please ensure the add-in is running in Word.");
+    }
+
+    await Word.run(async (context) => {
+      const paragraphs = context.document.body.paragraphs;
+      paragraphs.load("items");
+      await context.sync();
+
+      const targetParagraphs: Word.Paragraph[] = [];
+
+      // Find target paragraphs based on action.target
+      for (let i = 0; i < paragraphs.items.length; i++) {
+        const para = paragraphs.items[i];
+        para.load("style");
+        await context.sync();
+
+        const style = para.style;
+        const isHeading = style === "Heading 1" || style === "Heading 2" || style === "Heading 3";
+        const isParagraph = style === "Normal" || (!isHeading && style !== "");
+
+        if (action.target === "all") {
+          targetParagraphs.push(para);
+        } else if (action.target === "headings" && isHeading) {
+          targetParagraphs.push(para);
+        } else if (action.target === "paragraphs" && isParagraph) {
+          targetParagraphs.push(para);
+        }
+      }
+
+      // Apply formatting to target paragraphs
+      if (targetParagraphs.length > 0) {
+        targetParagraphs.forEach((para) => {
+          applyBlockFormatting(para, action.style);
+        });
+
+        await context.sync();
+      }
+    });
+  } catch (error) {
+    if (error instanceof Error) {
+      throw new ExecutionError(`Failed to execute update_text_format action: ${error.message}`, error);
+    }
+    throw new ExecutionError(`Failed to execute update_text_format action: ${String(error)}`, error);
+  }
+}
+
+/**
  * Executes an EditPlan
  */
 export async function executeEditPlan(editPlan: EditPlan): Promise<ExecutionResult> {
@@ -527,6 +651,8 @@ export async function executeEditPlan(editPlan: EditPlan): Promise<ExecutionResu
         await executeReplaceSection(action);
       } else if (action.type === "update_heading_style") {
         await executeUpdateHeadingStyle(action);
+      } else if (action.type === "update_text_format") {
+        await executeUpdateTextFormat(action);
       } else if (action.type === "correct_text") {
         await executeCorrectText(action);
       } else if (action.type === "insert_text") {

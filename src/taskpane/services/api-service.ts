@@ -38,15 +38,47 @@ export interface EditPlanApiError {
 export type EditPlanResult = EditPlanApiResponse | EditPlanApiError;
 
 /**
- * Reads document structure (headings and content) for context awareness
+ * Extracts keywords from user prompt for intelligent content search
  */
-async function getDocumentContext(): Promise<{ 
+function extractKeywords(prompt: string): string[] {
+  // Remove common stop words and extract meaningful keywords
+  const stopWords = new Set([
+    "the", "a", "an", "and", "or", "but", "in", "on", "at", "to", "for", "of", "with", "by",
+    "is", "are", "was", "were", "be", "been", "being", "have", "has", "had", "do", "does", "did",
+    "will", "would", "should", "could", "may", "might", "must", "can", "this", "that", "these", "those",
+    "i", "you", "he", "she", "it", "we", "they", "his", "her", "its", "our", "their",
+    "add", "insert", "write", "create", "make", "change", "fix", "update", "more", "about", "information"
+  ]);
+  
+  const words = prompt.toLowerCase()
+    .replace(/[^\w\s]/g, " ")
+    .split(/\s+/)
+    .filter(word => word.length > 2 && !stopWords.has(word));
+  
+  // Remove duplicates
+  const uniqueWords: string[] = [];
+  const seen = new Set<string>();
+  for (const word of words) {
+    if (!seen.has(word)) {
+      seen.add(word);
+      uniqueWords.push(word);
+    }
+  }
+  return uniqueWords;
+}
+
+/**
+ * Reads document structure and relevant content based on user prompt
+ */
+async function getDocumentContext(prompt: string): Promise<{ 
   headings: Array<{ text: string; level: number }>;
+  heading_hierarchy?: string;
+  relevant_content: Array<{ heading: string; level: number; paragraphs: string[] }>;
   content_summary: string;
   has_content: boolean;
 }> {
   if (typeof Word === "undefined") {
-    return { headings: [], content_summary: "", has_content: false };
+    return { headings: [], heading_hierarchy: "", relevant_content: [], content_summary: "", has_content: false };
   }
 
   try {
@@ -56,9 +88,21 @@ async function getDocumentContext(): Promise<{
       paragraphs.load("items");
       await context.sync();
 
-      const headings: Array<{ text: string; level: number }> = [];
-      const contentPieces: string[] = [];
+      const headings: Array<{ text: string; level: number; index: number }> = [];
+      const relevantContent: Array<{ heading: string; level: number; paragraphs: string[]; heading_index: number }> = [];
+      const allParagraphs: string[] = [];
       let hasContent = false;
+      let currentHeading: string | null = null;
+      let currentHeadingLevel = 0;
+      let currentHeadingIndex = -1;
+      let currentSectionParagraphs: string[] = [];
+
+      // Extract keywords from prompt for intelligent matching
+      const keywords = extractKeywords(prompt);
+      const promptLower = prompt.toLowerCase();
+      
+      // Check if this is a reordering/restructuring request
+      const isReorderingRequest = /reorder|reorganize|restructure|rewrite.*order|rearrange|reorder.*text/i.test(prompt);
 
       for (let i = 0; i < paragraphs.items.length; i++) {
         const para = paragraphs.items[i];
@@ -69,30 +113,104 @@ async function getDocumentContext(): Promise<{
         const text = para.text.trim();
         
         if (style === "Heading 1" || style === "Heading 2" || style === "Heading 3") {
+          // Save previous section if it was relevant
+          if (currentHeading && currentSectionParagraphs.length > 0) {
+            const sectionText = (currentHeading + " " + currentSectionParagraphs.join(" ")).toLowerCase();
+            const isRelevant = keywords.some(keyword => sectionText.includes(keyword)) ||
+                             promptLower.includes(currentHeading.toLowerCase().substring(0, 10));
+            
+            if (isRelevant) {
+              relevantContent.push({
+                heading: currentHeading,
+                level: currentHeadingLevel,
+                paragraphs: currentSectionParagraphs.slice(0, 3), // Max 3 paragraphs per section
+                heading_index: currentHeadingIndex
+              });
+            }
+          }
+          
           const level = style === "Heading 1" ? 1 : style === "Heading 2" ? 2 : 3;
           headings.push({
             text,
             level,
+            index: headings.length
           });
+          
+          currentHeading = text;
+          currentHeadingLevel = level;
+          currentHeadingIndex = headings.length - 1;
+          currentSectionParagraphs = [];
         } else if (text.length > 0) {
-          // Collect paragraph content (first 200 chars of each paragraph for context)
-          contentPieces.push(text.substring(0, 200));
+          allParagraphs.push(text);
+          currentSectionParagraphs.push(text.substring(0, 300)); // First 300 chars per paragraph
           hasContent = true;
         }
       }
 
-      // Create a summary of document content (first few paragraphs)
-      const contentSummary = contentPieces.slice(0, 5).join(" ").substring(0, 1000);
+      // Check last section
+      if (currentHeading && currentSectionParagraphs.length > 0) {
+        const sectionText = (currentHeading + " " + currentSectionParagraphs.join(" ")).toLowerCase();
+        const isRelevant = keywords.some(keyword => sectionText.includes(keyword)) ||
+                         promptLower.includes(currentHeading.toLowerCase().substring(0, 10));
+        
+        if (isRelevant) {
+          relevantContent.push({
+            heading: currentHeading,
+            level: currentHeadingLevel,
+            paragraphs: currentSectionParagraphs.slice(0, 3),
+            heading_index: currentHeadingIndex
+          });
+        }
+      }
+
+      // Create a summary from first few paragraphs if no relevant content found
+      const contentSummary = allParagraphs.length > 0 
+        ? allParagraphs.slice(0, 3).join(" ").substring(0, 500)
+        : "";
+      
+      // For reordering requests, include all paragraphs in relevant_content so AI can reorder them
+      if (isReorderingRequest && allParagraphs.length > 0) {
+        // Add all paragraphs as a single "section" for reordering
+        relevantContent.push({
+          heading: currentHeading || "Document Content",
+          level: currentHeadingLevel || 1,
+          paragraphs: allParagraphs, // Include ALL paragraphs for reordering
+          heading_index: currentHeadingIndex >= 0 ? currentHeadingIndex : 0
+        });
+      }
+
+      // Build hierarchical structure representation
+      const headingHierarchy: string[] = [];
+      const parentStack: Array<{ text: string; level: number }> = [];
+      
+      for (const heading of headings) {
+        // Pop parents that are at same or higher level
+        while (parentStack.length > 0 && parentStack[parentStack.length - 1].level >= heading.level) {
+          parentStack.pop();
+        }
+        
+        // Build hierarchy path
+        const path = parentStack.length > 0 
+          ? `${parentStack.map(p => p.text).join(" > ")} > ${heading.text}`
+          : heading.text;
+        
+        headingHierarchy.push(`  ${"  ".repeat(heading.level - 1)}[H${heading.level}] ${heading.text}`);
+        
+        // Add to parent stack
+        parentStack.push({ text: heading.text, level: heading.level });
+      }
 
       return { 
-        headings,
+        headings: headings.map(h => ({ text: h.text, level: h.level })), // Remove index for API
+        heading_hierarchy: headingHierarchy.join("\n"), // Hierarchical representation
+        relevant_content: relevantContent,
         content_summary: contentSummary,
         has_content: hasContent || headings.length > 0
       };
     });
   } catch (error) {
     console.error("Error reading document context:", error);
-    return { headings: [], content_summary: "", has_content: false };
+    return { headings: [], heading_hierarchy: "", relevant_content: [], content_summary: "", has_content: false };
   }
 }
 
@@ -106,8 +224,8 @@ export async function generateEditPlan(
   conversationHistory?: Array<{ role: "user" | "ai"; content: string }>
 ): Promise<EditPlanResult> {
   try {
-    // Get document context (headings) for content awareness
-    const documentContext = await getDocumentContext();
+    // Get document context (headings and relevant content) for content awareness
+    const documentContext = await getDocumentContext(prompt);
 
     const response = await fetch(`${API_BASE_URL}/api/generate-edit-plan`, {
       method: "POST",

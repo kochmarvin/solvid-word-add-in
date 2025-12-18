@@ -5,11 +5,14 @@
 
 export interface BlockStyle {
   color?: string;
+  alignment?: "left" | "center" | "right" | "justify";
+  bold?: boolean;
 }
 
 export interface ParagraphBlock {
   type: "paragraph";
   text: string;
+  style?: BlockStyle;
 }
 
 export interface HeadingBlock {
@@ -29,7 +32,14 @@ export interface ReplaceSectionAction {
 
 export interface UpdateHeadingStyleAction {
   type: "update_heading_style";
-  target: "all";
+  target: "all" | "specific";
+  heading_text?: string; // Required when target is "specific"
+  style: BlockStyle;
+}
+
+export interface UpdateTextFormatAction {
+  type: "update_text_format";
+  target: "all" | "headings" | "paragraphs";
   style: BlockStyle;
 }
 
@@ -48,7 +58,7 @@ export interface InsertTextAction {
   blocks: Block[];
 }
 
-export type EditAction = ReplaceSectionAction | UpdateHeadingStyleAction | CorrectTextAction | InsertTextAction;
+export type EditAction = ReplaceSectionAction | UpdateHeadingStyleAction | UpdateTextFormatAction | CorrectTextAction | InsertTextAction;
 
 export interface EditPlan {
   version: "1.0";
