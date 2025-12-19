@@ -2,6 +2,7 @@
  * API service for communicating with backend to generate EditPlan
  */
 import { EditPlanResponse, EditPlan } from "../types/edit-plan";
+import { SemanticDocument, SemanticEditResponse, DocumentBlock } from "../types/semantic-edit";
 import { ValidationError } from "../utils/errors";
 import { validateEditPlan } from "../utils/validation";
 
@@ -28,6 +29,7 @@ export interface EditPlanApiResponse {
   ok: true;
   response: string;
   editPlan: EditPlan;
+  semanticEditPlan?: { ops: Array<{ action: string; target_block_id: string; content: string; reason: string }> };
 }
 
 export interface EditPlanApiError {
@@ -65,6 +67,122 @@ function extractKeywords(prompt: string): string[] {
     }
   }
   return uniqueWords;
+}
+
+/**
+ * Extracts semantic document structure with sections and blocks with stable IDs
+ * Exported for use in execution engine
+ */
+export async function getSemanticDocument(): Promise<SemanticDocument> {
+  if (typeof Word === "undefined") {
+    return { sections: [], blocks: {} };
+  }
+
+  try {
+    return await Word.run(async (context) => {
+      const body = context.document.body;
+      const paragraphs = body.paragraphs;
+      paragraphs.load("items");
+      await context.sync();
+
+      const sections: Array<{ id: string; title: string; level: number; blocks: string[] }> = [];
+      const blocks: Record<string, DocumentBlock> = {};
+      
+      let blockCounter = 1;
+      let sectionCounter = 1;
+      let currentSectionId: string | null = null;
+      let currentSectionBlocks: string[] = [];
+
+      for (let i = 0; i < paragraphs.items.length; i++) {
+        const para = paragraphs.items[i];
+        para.load("style,text");
+        await context.sync();
+
+        const style = para.style;
+        const text = para.text.trim();
+        
+        if (!text) continue;
+
+        const blockId = `b${blockCounter++}`;
+
+        if (style === "Heading 1" || style === "Heading 2" || style === "Heading 3") {
+          // Save previous section if it exists
+          if (currentSectionId && currentSectionBlocks.length > 0) {
+            sections.push({
+              id: currentSectionId,
+              title: sections.find(s => s.id === currentSectionId)?.title || "",
+              level: sections.find(s => s.id === currentSectionId)?.level || 1,
+              blocks: currentSectionBlocks
+            });
+          }
+
+          // Create new section
+          const level = style === "Heading 1" ? 1 : style === "Heading 2" ? 2 : 3;
+          const sectionId = `s${sectionCounter++}`;
+          
+          blocks[blockId] = {
+            id: blockId,
+            type: "heading",
+            text,
+            level
+          };
+
+          sections.push({
+            id: sectionId,
+            title: text,
+            level,
+            blocks: [blockId]
+          });
+
+          currentSectionId = sectionId;
+          currentSectionBlocks = [blockId];
+        } else {
+          // Regular paragraph
+          blocks[blockId] = {
+            id: blockId,
+            type: "paragraph",
+            text
+          };
+
+          if (currentSectionId) {
+            currentSectionBlocks.push(blockId);
+          } else {
+            // No section yet, create a default one
+            const sectionId = `s${sectionCounter++}`;
+            sections.push({
+              id: sectionId,
+              title: "Introduction",
+              level: 1,
+              blocks: [blockId]
+            });
+            currentSectionId = sectionId;
+            currentSectionBlocks = [blockId];
+          }
+        }
+      }
+
+      // Save last section
+      if (currentSectionId && currentSectionBlocks.length > 0) {
+        const existingSection = sections.find(s => s.id === currentSectionId);
+        if (existingSection) {
+          existingSection.blocks = currentSectionBlocks;
+        }
+      }
+
+      return {
+        sections: sections.map(s => ({
+          id: s.id,
+          title: s.title,
+          level: s.level,
+          blocks: s.blocks
+        })),
+        blocks
+      };
+    });
+  } catch (error) {
+    console.error("Error extracting semantic document:", error);
+    return { sections: [], blocks: {} };
+  }
 }
 
 /**
@@ -226,7 +344,10 @@ export async function generateEditPlan(
   selectedRange?: { tag: string; text: string } | null
 ): Promise<EditPlanResult> {
   try {
-    // Get document context (headings and relevant content) for content awareness
+    // Get semantic document structure (sections and blocks with IDs)
+    const semanticDocument = await getSemanticDocument();
+    
+    // Also get legacy document context for backward compatibility
     const documentContext = await getDocumentContext(prompt);
 
     const response = await fetch(`${API_BASE_URL}/api/generate-edit-plan`, {
@@ -238,6 +359,7 @@ export async function generateEditPlan(
         prompt,
         conversation_history: conversationHistory || [],
         document_context: documentContext,
+        semantic_document: semanticDocument,
         selected_range: selectedRange ? {
           tag: selectedRange.tag,
           text: selectedRange.text
@@ -271,17 +393,48 @@ export async function generateEditPlan(
 
     const responseData = data as Record<string, unknown>;
 
-    // Check for edit_plan field
+    // Check if this is a semantic edit plan (has "ops" field) or legacy edit plan (has "edit_plan" field)
+    if (responseData.ops && Array.isArray(responseData.ops)) {
+      // This is a semantic edit plan
+      const semanticEditPlan = responseData as { response: string; ops: Array<{ action: string; target_block_id: string; content: string; reason: string }> };
+      
+      // Validate that ops array is not empty
+      if (semanticEditPlan.ops.length === 0) {
+        return {
+          ok: false,
+          error: {
+            message: "Semantic edit plan must have at least one operation",
+          },
+        };
+      }
+      
+      const response: EditPlanApiResponse = {
+        ok: true,
+        response: semanticEditPlan.response || "Semantic edit plan generated",
+        editPlan: {
+          version: "1.0",
+          actions: [] // Semantic plans use ops, not actions - empty array is OK for semantic plans
+        } as EditPlan,
+        semanticEditPlan: {
+          ops: semanticEditPlan.ops
+        }
+      };
+      
+      console.log("API Service - Returning semantic edit plan with ops count:", semanticEditPlan.ops.length);
+      return response;
+    }
+
+    // Check for edit_plan field (legacy format)
     if (!responseData.edit_plan) {
       return {
         ok: false,
         error: {
-          message: "Invalid API response: missing edit_plan field",
+          message: "Invalid API response: missing edit_plan or ops field",
         },
       };
     }
 
-    // Validate the EditPlan schema
+    // Validate the EditPlan schema (legacy format)
     let editPlan: EditPlan;
     try {
       editPlan = validateEditPlan(responseData.edit_plan);

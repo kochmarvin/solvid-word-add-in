@@ -13,6 +13,8 @@ import { Conversation, Message } from "./ui/message";
 import { Button } from "./ui/button";
 import { generateEditPlan } from "../services/api-service";
 import { executeEditPlan } from "../utils/execution-engine";
+import { executeSemanticEditPlan } from "../utils/semantic-execution-engine";
+import { getSemanticDocument } from "../services/api-service";
 import { EditPlan } from "../types/edit-plan";
 import { AnchorNotFoundError } from "../utils/errors";
 
@@ -24,6 +26,8 @@ interface ChatMessage {
 interface PreviewState {
   editPlan: EditPlan;
   response: string;
+  semanticEditPlan?: { ops: Array<{ action: string; target_block_id: string; content: string; reason: string }> };
+  semanticDocument?: { sections: Array<{ id: string; title: string; level: number; blocks: string[] }>; blocks: Record<string, { type: "paragraph" | "heading"; text: string; level?: number; id?: string }> };
 }
 
 interface SelectedRange {
@@ -236,14 +240,21 @@ const App: React.FC = () => {
 
     // Add user message
     const userMessage: ChatMessage = { role: "user", content: prompt };
-    setMessages((prev) => [...prev, userMessage]);
+    const updatedMessages = [...messages, userMessage];
+    setMessages(updatedMessages);
     setInputValue("");
     setIsLoading(true);
     setPreview(null);
 
     try {
+      // Get semantic document structure BEFORE generating the plan
+      // This ensures we have the same structure that will be sent to the AI
+      const semanticDoc = await getSemanticDocument();
+      console.log("handleSubmit - Got semantic document with", Object.keys(semanticDoc.blocks).length, "blocks");
+      
       // Call API to generate EditPlan with conversation history and selected range for context
-      const result = await generateEditPlan(prompt, messages, selectedRange);
+      // Use updatedMessages to include the current user message in conversation history
+      const result = await generateEditPlan(prompt, updatedMessages, selectedRange);
 
       if (!result.ok) {
         // Show error message
@@ -262,10 +273,28 @@ const App: React.FC = () => {
         content: result.response,
       };
       setMessages((prev) => [...prev, aiMessage]);
-      setPreview({
-        editPlan: result.editPlan,
-        response: result.response,
-      });
+      
+      // Check if this is a semantic edit plan (has ops field)
+      const semanticEditPlan = (result as any).semanticEditPlan;
+      console.log("handleSubmit - result:", result);
+      console.log("handleSubmit - semanticEditPlan:", semanticEditPlan);
+      
+      if (semanticEditPlan && semanticEditPlan.ops && Array.isArray(semanticEditPlan.ops) && semanticEditPlan.ops.length > 0) {
+        console.log("Setting preview with semantic edit plan, ops count:", semanticEditPlan.ops.length);
+        console.log("Storing semantic document with", Object.keys(semanticDoc.blocks).length, "blocks");
+        setPreview({
+          editPlan: result.editPlan,
+          response: result.response,
+          semanticEditPlan: semanticEditPlan,
+          semanticDocument: semanticDoc, // Store the document structure used for generation
+        });
+      } else {
+        console.log("Setting preview with legacy edit plan");
+        setPreview({
+          editPlan: result.editPlan,
+          response: result.response,
+        });
+      }
     } catch (error) {
       const errorMessage: ChatMessage = {
         role: "ai",
@@ -293,27 +322,65 @@ const App: React.FC = () => {
     setIsLoading(true);
 
     try {
-      const result = await executeEditPlan(preview.editPlan);
-
-      if (result.ok) {
+      // Check if this is a semantic edit plan (has ops)
+      console.log(preview);
+      const hasSemanticOps = preview.semanticEditPlan && 
+                            preview.semanticEditPlan.ops && 
+                            Array.isArray(preview.semanticEditPlan.ops) && 
+                            preview.semanticEditPlan.ops.length > 0;
+      
+      console.log("handleApply - preview.semanticEditPlan:", preview.semanticEditPlan);
+      console.log("handleApply - hasSemanticOps:", hasSemanticOps);
+      
+      if (hasSemanticOps) {
+        // Use the semantic document structure from when the plan was generated
+        // This ensures block IDs match correctly
+        if (!preview.semanticDocument) {
+          throw new Error("Semantic document structure not found in preview. This should not happen.");
+        }
+        
+        await executeSemanticEditPlan(
+          {
+            ops: preview.semanticEditPlan!.ops.map(op => ({
+              action: op.action as "insert_after" | "insert_before" | "replace",
+              target_block_id: op.target_block_id,
+              content: op.content,
+              reason: op.reason
+            }))
+          },
+          preview.semanticDocument
+        );
+        
         const successMessage: ChatMessage = {
           role: "ai",
-          content: result.message,
+          content: "Semantic edit plan executed successfully.",
         };
         setMessages((prev) => [...prev, successMessage]);
         setPreview(null);
       } else {
-        const errorResult = result as { ok: false; error_type: string; message: string; details?: Record<string, unknown> };
-        let errorMessage = errorResult.message;
-        if (errorResult.error_type === "anchor_not_found") {
-          const anchor = (errorResult.details as { anchor?: string })?.anchor || "unknown";
-          errorMessage = `Anchor not found: ${anchor}. ${errorResult.message}`;
+        // Use legacy execution engine
+        const result = await executeEditPlan(preview.editPlan);
+
+        if (result.ok) {
+          const successMessage: ChatMessage = {
+            role: "ai",
+            content: result.message,
+          };
+          setMessages((prev) => [...prev, successMessage]);
+          setPreview(null);
+        } else {
+          const errorResult = result as { ok: false; error_type: string; message: string; details?: Record<string, unknown> };
+          let errorMessage = errorResult.message;
+          if (errorResult.error_type === "anchor_not_found") {
+            const anchor = (errorResult.details as { anchor?: string })?.anchor || "unknown";
+            errorMessage = `Anchor not found: ${anchor}. ${errorResult.message}`;
+          }
+          const errorMsg: ChatMessage = {
+            role: "ai",
+            content: `Execution failed: ${errorMessage}`,
+          };
+          setMessages((prev) => [...prev, errorMsg]);
         }
-        const errorMsg: ChatMessage = {
-          role: "ai",
-          content: `Execution failed: ${errorMessage}`,
-        };
-        setMessages((prev) => [...prev, errorMsg]);
       }
     } catch (error) {
       const errorMsg: ChatMessage = {
@@ -448,7 +515,7 @@ const App: React.FC = () => {
             </div>
           )}
           <InputGroup>
-            <InputGroupTextarea
+          <InputGroupTextarea
               ref={textareaRef}
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
@@ -460,31 +527,31 @@ const App: React.FC = () => {
               }}
               placeholder="Describe the document changes you want..."
               disabled={isLoading}
-            />
-            <InputGroupAddon align="block-end">
+          />
+          <InputGroupAddon align="block-end">
               <InputGroupButton variant="outline" size="sm" type="button">
-                <Brain />
-                Wissen verwalten
-              </InputGroupButton>
+              <Brain />
+              Wissen verwalten
+            </InputGroupButton>
               <InputGroupButton variant="outline" size="sm" type="button">
-                <SlidersHorizontal />
-              </InputGroupButton>
-              <InputGroupButton
-                variant="default"
-                className="rounded-full ml-auto"
-                size="icon-sm"
+              <SlidersHorizontal />
+            </InputGroupButton>
+            <InputGroupButton
+              variant="default"
+              className="rounded-full ml-auto"
+              size="icon-sm"
                 type="submit"
                 disabled={isLoading || !inputValue.trim()}
-              >
+            >
                 {isLoading ? (
                   <Loader2 className="h-4 w-4 animate-spin" />
                 ) : (
-                  <ArrowUpIcon />
+              <ArrowUpIcon />
                 )}
-                <span className="sr-only">Send</span>
-              </InputGroupButton>
-            </InputGroupAddon>
-          </InputGroup>
+              <span className="sr-only">Send</span>
+            </InputGroupButton>
+          </InputGroupAddon>
+        </InputGroup>
         </form>
       </div>
     </div>

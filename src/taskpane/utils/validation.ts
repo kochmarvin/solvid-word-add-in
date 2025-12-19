@@ -288,8 +288,17 @@ export function validateEditPlan(editPlan: unknown): EditPlan {
   if (!Array.isArray(plan.actions)) {
     throw new ValidationError("EditPlan must have an actions array");
   }
+  
+  // Allow empty actions array - this might be a semantic plan placeholder
+  // The actual validation will be done at the API service level
+  // Semantic plans use 'ops' instead of 'actions', so empty actions is valid for them
   if (plan.actions.length === 0) {
-    throw new ValidationError("EditPlan must have at least one action");
+    // Return early - allow empty actions (semantic plans will be validated separately)
+    // Create a proper EditPlan object with validated properties
+    return {
+      version: plan.version as "1.0",
+      actions: plan.actions as EditAction[]
+    };
   }
   if (plan.actions.length > MAX_ACTIONS) {
     throw new ValidationError(
