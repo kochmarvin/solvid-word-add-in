@@ -33,6 +33,24 @@ const App: React.FC = () => {
   const [preview, setPreview] = useState<PreviewState | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
+  // Check for selected text from context menu on mount
+  React.useEffect(() => {
+    if (typeof Office !== "undefined" && Office.context?.document?.settings) {
+      const selectedText = Office.context.document.settings.get("selectedText");
+      if (selectedText && typeof selectedText === "string") {
+        // Pre-fill the input with a prompt about the selected text
+        setInputValue(`Format or edit this text: "${selectedText}"`);
+        // Clear the setting so it doesn't persist
+        Office.context.document.settings.remove("selectedText");
+        Office.context.document.settings.saveAsync();
+        // Focus the textarea
+        setTimeout(() => {
+          textareaRef.current?.focus();
+        }, 100);
+      }
+    }
+  }, []);
+
   const handleSubmit = async (e?: React.FormEvent) => {
     e?.preventDefault();
 
