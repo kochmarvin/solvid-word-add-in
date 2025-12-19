@@ -191,12 +191,17 @@ function validateInsertTextAction(action: InsertTextAction): void {
   if (!action.anchor || typeof action.anchor !== "string" || action.anchor.trim() === "") {
     throw new ValidationError("insert_text action must have a non-empty anchor string");
   }
-  if (action.location !== "start" && action.location !== "end" && action.location !== "after_heading") {
-    throw new ValidationError('insert_text action location must be "start", "end", or "after_heading"');
+  if (action.location !== "start" && action.location !== "end" && action.location !== "after_heading" && action.location !== "at_position") {
+    throw new ValidationError('insert_text action location must be "start", "end", "after_heading", or "at_position"');
   }
   if (action.location === "after_heading") {
     if (!action.heading_text || typeof action.heading_text !== "string" || action.heading_text.trim() === "") {
       throw new ValidationError("insert_text action must have heading_text when location is 'after_heading'");
+    }
+  }
+  if (action.location === "at_position") {
+    if (typeof action.position !== "number") {
+      throw new ValidationError("insert_text action must have position (number) when location is 'at_position'");
     }
   }
   if (!Array.isArray(action.blocks)) {

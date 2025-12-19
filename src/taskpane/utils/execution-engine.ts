@@ -226,19 +226,56 @@ async function executeReplaceSection(action: ReplaceSectionAction): Promise<void
       throw new ExecutionError("Word API is not available. Please ensure the add-in is running in Word.");
     }
 
-    // For "main" anchor, replace entire document body content
-    // For other anchors, we'll also use the same approach for simplicity
     await Word.run(async (context) => {
-      const body = context.document.body;
+      // For "selected" anchor, resolve via Content Control
+      // For "main" anchor or other anchors, use standard resolution
+      let targetRange: Word.Range;
       
-      // Clear the body content
-      body.clear();
-      await context.sync();
+      if (action.anchor === "selected") {
+        // Find the Content Control with solvid-selected- tag
+        const contentControls = context.document.contentControls;
+        contentControls.load("items");
+        await context.sync();
+        
+        let foundCC: Word.ContentControl | null = null;
+        for (let i = 0; i < contentControls.items.length; i++) {
+          const cc = contentControls.items[i];
+          cc.load("tag");
+          await context.sync();
+          
+          if (cc.tag && cc.tag.startsWith("solvid-selected-")) {
+            foundCC = cc;
+            break;
+          }
+        }
+        
+        if (!foundCC) {
+          throw new ExecutionError("Selected content not found. Please select text and try again.");
+        }
+        
+        targetRange = foundCC.getRange();
+        targetRange.load("text");
+        await context.sync();
+      } else {
+        // Use standard anchor resolution for other anchors
+        targetRange = await resolveAnchor(action.anchor);
+      }
 
-      // Get the body range for insertion
-      const bodyRange = body.getRange();
+      // For "main" anchor, clear entire body; for others, clear just the target range
+      if (action.anchor === "main") {
+        const body = context.document.body;
+        body.clear();
+        await context.sync();
+        targetRange = body.getRange();
+      } else {
+        // Clear the target range content
+        targetRange.clear();
+        await context.sync();
+      }
+
+      // Insert new blocks
       let insertLocation: Word.InsertLocation.before | Word.InsertLocation.after = Word.InsertLocation.before;
-      let currentRange = bodyRange;
+      let currentRange = targetRange;
 
       // Insert blocks sequentially
       for (const block of action.blocks) {
@@ -361,6 +398,49 @@ async function executeInsertText(action: InsertTextAction): Promise<void> {
             `Heading not found: "${action.heading_text}". Please check the heading text and try again.`
           );
         }
+      } else if (action.location === "at_position") {
+        // Insert at a specific position
+        if (typeof action.position !== "number") {
+          throw new ExecutionError("position is required when location is 'at_position'");
+        }
+        
+        const bodyRange = body.getRange();
+        bodyRange.load("start");
+        await context.sync();
+        
+        // Create a range at the specified position
+        const positionRange = bodyRange.getRange();
+        // We need to find the paragraph that contains this position
+        const paragraphs = body.paragraphs;
+        paragraphs.load("items");
+        await context.sync();
+        
+        let foundPara: Word.Paragraph | null = null;
+        for (let i = 0; i < paragraphs.items.length; i++) {
+          const para = paragraphs.items[i];
+          const paraRange = para.getRange();
+          paraRange.load("start,end");
+          await context.sync();
+          
+          if (paraRange.start <= action.position && paraRange.end >= action.position) {
+            foundPara = para;
+            break;
+          }
+        }
+        
+        if (foundPara) {
+          const paraRange = foundPara.getRange();
+          paraRange.load("start");
+          await context.sync();
+          
+          // Create a range at the exact position
+          insertRange = paraRange.getRange();
+          insertRange.start = action.position;
+          insertRange.end = action.position;
+        } else {
+          // If position not found in any paragraph, use body range
+          insertRange = bodyRange;
+        }
       } else if (action.location === "start") {
         insertRange = body.getRange(Word.RangeLocation.start);
       } else {
@@ -370,7 +450,7 @@ async function executeInsertText(action: InsertTextAction): Promise<void> {
       // Insert blocks sequentially
       let currentRange = insertRange;
       let insertLocation: Word.InsertLocation.before | Word.InsertLocation.after = 
-        action.location === "start" ? Word.InsertLocation.before : Word.InsertLocation.after;
+        (action.location === "start" || action.location === "at_position") ? Word.InsertLocation.before : Word.InsertLocation.after;
 
       for (const block of action.blocks) {
         if (block.type === "paragraph") {

@@ -28,6 +28,7 @@ export interface ReplaceSectionAction {
   type: "replace_section";
   anchor: string;
   blocks: Block[];
+  // When anchor is "selected", it will be resolved via Content Control tag
 }
 
 export interface UpdateHeadingStyleAction {
@@ -53,8 +54,9 @@ export interface CorrectTextAction {
 export interface InsertTextAction {
   type: "insert_text";
   anchor: string;
-  location: "start" | "end" | "after_heading";
+  location: "start" | "end" | "after_heading" | "at_position";
   heading_text?: string; // Required when location is "after_heading"
+  position?: number; // Required when location is "at_position" - the position to insert at
   blocks: Block[];
 }
 

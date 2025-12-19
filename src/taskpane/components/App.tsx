@@ -26,30 +26,205 @@ interface PreviewState {
   response: string;
 }
 
+interface SelectedRange {
+  tag: string;
+  text: string;
+}
+
 const App: React.FC = () => {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [inputValue, setInputValue] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [preview, setPreview] = useState<PreviewState | null>(null);
+  const [selectedRange, setSelectedRange] = useState<SelectedRange | null>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
 
   // Check for selected text from context menu on mount
   React.useEffect(() => {
-    if (typeof Office !== "undefined" && Office.context?.document?.settings) {
-      const selectedText = Office.context.document.settings.get("selectedText");
-      if (selectedText && typeof selectedText === "string") {
-        // Pre-fill the input with a prompt about the selected text
+    let cancelled = false;
+
+    const readSettings = () => {
+      if (cancelled) return;
+      const settings = Office.context?.document?.settings;
+      if (!settings) return;
+
+      const selectedText = settings.get("selectedText");
+      const selectedTag = settings.get("selectedTag");
+
+      if (selectedText && typeof selectedText === "string" && selectedTag && typeof selectedTag === "string") {
         setInputValue(`Format or edit this text: "${selectedText}"`);
-        // Clear the setting so it doesn't persist
-        Office.context.document.settings.remove("selectedText");
-        Office.context.document.settings.saveAsync();
-        // Focus the textarea
-        setTimeout(() => {
-          textareaRef.current?.focus();
-        }, 100);
+        setSelectedRange({ tag: selectedTag, text: selectedText });
+
+        settings.remove("selectedText");
+        settings.remove("selectedTag");
+        settings.saveAsync(); // fine with callback omitted
+
+        setTimeout(() => textareaRef.current?.focus(), 100);
       }
-    }
+    };
+
+    if (typeof Office === "undefined") return () => { };
+
+    Office.onReady(() => {
+      readSettings();
+    });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
+
+  async function readSelectionAndUpdate() {
+    if (typeof Word === "undefined") return;
+
+    await Word.run(async (context) => {
+      // Find the current solvid-selected Content Control
+      const contentControls = context.document.contentControls;
+      contentControls.load("items");
+      await context.sync();
+      
+      let foundCC: Word.ContentControl | null = null;
+      for (let i = 0; i < contentControls.items.length; i++) {
+        const cc = contentControls.items[i];
+        cc.load("tag");
+        await context.sync();
+        
+        if (cc.tag && cc.tag.startsWith("solvid-selected-")) {
+          foundCC = cc;
+          break;
+        }
+      }
+      
+      if (foundCC) {
+        const ccRange = foundCC.getRange();
+        ccRange.load("text");
+        await context.sync();
+        
+        const txt = (ccRange.text || "").trim();
+        if (txt) {
+          foundCC.load("tag");
+          await context.sync();
+          setSelectedRange({ tag: foundCC.tag, text: txt });
+          setInputValue(`Format or edit this text: "${txt}"`);
+        } else {
+          setSelectedRange(null);
+        }
+      } else {
+        setSelectedRange(null);
+      }
+    });
+  }
+
+  async function getSelectedText(): Promise<string> {
+    if (typeof Word === "undefined") return "";
+
+    return Word.run(async (context) => {
+      const sel = context.document.getSelection();
+      sel.load("text");
+      await context.sync();
+      return (sel.text || "").trim();
+    });
+  }
+
+
+  React.useEffect(() => {
+    if (typeof Office === "undefined") return () => {}  ;
+
+    let disposed = false;
+    let selectionHandlerAttached = false;
+
+    const refreshBadge = async () => {
+      if (disposed) return;
+      try {
+        // Find the current solvid-selected Content Control
+        if (typeof Word === "undefined") return;
+        
+        await Word.run(async (context) => {
+          const contentControls = context.document.contentControls;
+          contentControls.load("items");
+          await context.sync();
+          
+          let foundCC: Word.ContentControl | null = null;
+          for (let i = 0; i < contentControls.items.length; i++) {
+            const cc = contentControls.items[i];
+            cc.load("tag");
+            await context.sync();
+            
+            if (cc.tag && cc.tag.startsWith("solvid-selected-")) {
+              foundCC = cc;
+              break;
+            }
+          }
+          
+          if (!disposed && foundCC) {
+            const ccRange = foundCC.getRange();
+            ccRange.load("text");
+            foundCC.load("tag");
+            await context.sync();
+            
+            const txt = (ccRange.text || "").trim();
+            if (txt) {
+              setSelectedRange({ tag: foundCC.tag, text: txt });
+            } else {
+              setSelectedRange(null);
+            }
+          } else if (!disposed) {
+            setSelectedRange(null);
+          }
+        });
+      } catch {
+        if (!disposed) setSelectedRange(null);
+      }
+    };
+
+    // Debounce so selection drag doesn't spam Word.run
+    let t: number | undefined;
+    const refreshDebounced = () => {
+      if (t) window.clearTimeout(t);
+      t = window.setTimeout(() => void refreshBadge(), 150);
+    };
+
+    Office.onReady(() => {
+      // 1) Refresh once when pane loads
+      void refreshBadge();
+
+      // 2) Refresh when user changes selection in the doc
+      // Use Office.js DocumentSelectionChanged event (not Word context.document.onSelectionChanged)
+      Office.context.document.addHandlerAsync(
+        Office.EventType.DocumentSelectionChanged,
+        refreshDebounced,
+        () => {
+          selectionHandlerAttached = true;
+        }
+      );
+    });
+
+    // 3) Refresh when commands ping via localStorage (right-click menu click)
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === "solvid:refreshSelection") {
+        void refreshBadge();
+      }
+    };
+    window.addEventListener("storage", onStorage);
+
+    return () => {
+      disposed = true;
+      window.removeEventListener("storage", onStorage);
+
+      if (selectionHandlerAttached) {
+        try {
+          Office.context.document.removeHandlerAsync(
+            Office.EventType.DocumentSelectionChanged,
+            { handler: refreshDebounced }
+          );
+        } catch {
+          // best-effort cleanup
+        }
+      }
+      if (t) window.clearTimeout(t);
+    };
+  }, []);
+
 
   const handleSubmit = async (e?: React.FormEvent) => {
     e?.preventDefault();
@@ -67,8 +242,8 @@ const App: React.FC = () => {
     setPreview(null);
 
     try {
-      // Call API to generate EditPlan with conversation history for context
-      const result = await generateEditPlan(prompt, messages);
+      // Call API to generate EditPlan with conversation history and selected range for context
+      const result = await generateEditPlan(prompt, messages, selectedRange);
 
       if (!result.ok) {
         // Show error message
@@ -217,6 +392,61 @@ const App: React.FC = () => {
       </Conversation>
       <div className="fixed bottom-0 left-0 right-0 w-full p-7 bg-white dark:bg-gray-900">
         <form onSubmit={handleSubmit} className="max-w-4xl mx-auto">
+          {selectedRange && (
+            <div className="mb-2 flex items-center gap-2">
+              <div className="inline-flex items-center gap-1.5 rounded-md bg-blue-100 dark:bg-blue-900/30 px-2.5 py-1 text-xs font-medium text-blue-800 dark:text-blue-200 border border-blue-200 dark:border-blue-800">
+                <span className="text-blue-600 dark:text-blue-400">Selected:</span>
+                <span className="max-w-[520px] truncate">
+                  {selectedRange.text}
+                </span>
+              </div>
+
+              <button
+                type="button"
+                onClick={async () => {
+                  if (typeof Word !== "undefined") {
+                    // Remove ALL active selections by hiding the Content Control borders
+                    // Instead of deleting, we'll change appearance to "Hidden" to preserve text
+                    await Word.run(async (context) => {
+                      const contentControls = context.document.contentControls;
+                      contentControls.load("items");
+                      await context.sync();
+                      
+                      // Hide all solvid-selected Content Controls by changing appearance
+                      for (let i = 0; i < contentControls.items.length; i++) {
+                        const cc = contentControls.items[i];
+                        cc.load("tag,appearance");
+                        await context.sync();
+                        
+                        if (cc.tag && cc.tag.startsWith("solvid-selected-")) {
+                          // Change appearance to "Hidden" to remove the border
+                          // This preserves the text content
+                          cc.appearance = "Hidden";
+                          // Also change tag to mark as inactive
+                          cc.tag = `solvid-inactive-${Date.now()}`;
+                        }
+                      }
+                      await context.sync();
+                    });
+                  }
+                  setSelectedRange(null);
+                }}
+                className="text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 underline"
+              >
+                Clear
+              </button>
+
+              <button
+                type="button"
+                onClick={async () => {
+                  await readSelectionAndUpdate();
+                }}
+                className="text-xs text-gray-500 hover:text-gray-700 dark:text-gray-400 dark:hover:text-gray-200 underline"
+              >
+                Update
+              </button>
+            </div>
+          )}
           <InputGroup>
             <InputGroupTextarea
               ref={textareaRef}

@@ -5,27 +5,11 @@
 
 /* global Office Word */
 
-Office.onReady(() => {
-  // If needed, Office.js is ready to be called.
-});
-
 /**
  * Shows a notification when the add-in command is executed.
  * @param event
  */
 function action(event: Office.AddinCommands.Event) {
-  const message: Office.NotificationMessageDetails = {
-    type: Office.MailboxEnums.ItemNotificationMessageType.InformationalMessage,
-    message: "Performed action.",
-    icon: "Icon.80x80",
-    persistent: true,
-  };
-
-  // Show a notification message.
-  Office.context.mailbox.item?.notificationMessages.replaceAsync(
-    "ActionPerformanceNotification",
-    message
-  );
 
   // Be sure to indicate when the add-in command function is complete.
   event.completed();
@@ -36,44 +20,139 @@ function action(event: Office.AddinCommands.Event) {
  * Gets the selected text and opens the task pane
  * @param event
  */
+/* global Office */
+
 function formatSelectedText(event: Office.AddinCommands.Event) {
+  // IMPORTANT: event.completed() must be called synchronously
+  event.completed();
+  
   // Check if Word API is available
   if (typeof Word === "undefined") {
-    // Just open the task pane if Word API is not available
     Office.addin.showAsTaskpane();
-    event.completed();
     return;
   }
 
+  // Capture selection as Content Control
   Word.run(async (context) => {
     try {
-      // Get the selected text
       const selection = context.document.getSelection();
       selection.load("text");
       await context.sync();
 
       const selectedText = selection.text.trim();
-
-      if (selectedText) {
-        // Store the selected text in Office.context.document.settings
-        // This will be available when the task pane opens
-        Office.context.document.settings.set("selectedText", selectedText);
-        await Office.context.document.settings.saveAsync();
+      if (!selectedText) {
+        Office.addin.showAsTaskpane();
+        return;
       }
 
-      // Open the task pane
+      // IMPORTANT: Store the selection text BEFORE any operations
+      const selectionRange = selection.getRange();
+      selectionRange.load("text");
+      await context.sync();
+      const selectionTextToPreserve = selectionRange.text;
+
+      // First, check for existing solvid-selected Content Controls
+      const contentControls = context.document.contentControls;
+      contentControls.load("items");
+      await context.sync();
+      
+      // Check if selection is inside an existing solvid-selected Content Control
+      let existingCC: Word.ContentControl | null = null;
+      const oldControls: Word.ContentControl[] = [];
+      
+      for (let i = 0; i < contentControls.items.length; i++) {
+        const cc = contentControls.items[i];
+        cc.load("tag");
+        await context.sync();
+        
+        if (cc.tag && cc.tag.startsWith("solvid-selected-")) {
+          const ccRange = cc.getRange();
+          ccRange.load("text");
+          await context.sync();
+          
+          // Check if current selection text matches or overlaps with this Content Control
+          if (ccRange.text === selectedText || 
+              ccRange.text.includes(selectedText) || 
+              selectedText.includes(ccRange.text)) {
+            // Selection is the same or overlaps - reuse this control
+            existingCC = cc;
+          } else {
+            // Different selection - mark for deletion
+            oldControls.push(cc);
+          }
+        }
+      }
+      
+      // Hide old Content Controls (remove borders) instead of deleting
+      // This preserves the text while removing the visual selection
+      for (const oldCC of oldControls) {
+        // Hide the Content Control border and mark as inactive
+        oldCC.appearance = "Hidden";
+        oldCC.tag = `solvid-inactive-${Date.now()}`;
+        oldCC.load("tag,appearance");
+      }
+      await context.sync();
+
+      // Create or update Content Control
+      let cc: Word.ContentControl;
+      const tag = `solvid-selected-${Date.now()}`;
+      
+      if (existingCC) {
+        // Update existing control with new tag
+        cc = existingCC;
+        cc.tag = tag;
+        cc.load("tag");
+        await context.sync();
+      } else {
+        // Create a new Content Control to mark the selection
+        cc = selection.insertContentControl();
+        cc.tag = tag;
+        cc.title = "Solvid Selection";
+        cc.appearance = "BoundingBox";
+        cc.load("id,tag");
+        await context.sync();
+      }
+
+      // Store the tag and text in document settings
+      Office.context.document.settings.set("selectedText", selectedText);
+      Office.context.document.settings.set("selectedTag", tag);
+      await Office.context.document.settings.saveAsync();
+
+      // Also ping taskpane via localStorage
+      localStorage.setItem("solvid:refreshSelection", String(Date.now()));
+
+      // Ensure taskpane is visible
       Office.addin.showAsTaskpane();
     } catch (error) {
-      // If there's an error, just open the task pane
-      console.error("Error getting selected text:", error);
+      // If error, just open taskpane
       Office.addin.showAsTaskpane();
-    } finally {
-      // Always complete the event
-      event.completed();
     }
+  }).catch(() => {
+    Office.addin.showAsTaskpane();
   });
 }
 
-// Register the functions with Office.
-Office.actions.associate("action", action);
-Office.actions.associate("formatSelectedText", formatSelectedText);
+Office.onReady(() => {
+  Office.actions.associate("formatSelectedText", formatSelectedText);
+});
+
+
+
+// Make function globally accessible (required for Office Add-in commands)
+// @ts-ignore
+window.formatSelectedText = formatSelectedText;
+
+// Register functions when Office.js is ready
+Office.onReady(() => {
+  try {
+    // Register the functions with Office.
+    // These functions will be called when the corresponding commands are executed
+    Office.actions.associate("action", action);
+    Office.actions.associate("formatSelectedText", formatSelectedText);
+  } catch (error) {
+    // Log registration errors if possible
+    if (typeof console !== "undefined") {
+      console.error("Error registering actions:", error);
+    }
+  }
+});

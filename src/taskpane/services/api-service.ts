@@ -218,10 +218,12 @@ async function getDocumentContext(prompt: string): Promise<{
  * Calls the backend API to generate an EditPlan from a user prompt
  * @param prompt - The user's prompt/request
  * @param conversationHistory - Optional conversation history for context
+ * @param selectedRange - Optional selected text range to target
  */
 export async function generateEditPlan(
   prompt: string,
-  conversationHistory?: Array<{ role: "user" | "ai"; content: string }>
+  conversationHistory?: Array<{ role: "user" | "ai"; content: string }>,
+  selectedRange?: { tag: string; text: string } | null
 ): Promise<EditPlanResult> {
   try {
     // Get document context (headings and relevant content) for content awareness
@@ -235,7 +237,11 @@ export async function generateEditPlan(
       body: JSON.stringify({ 
         prompt,
         conversation_history: conversationHistory || [],
-        document_context: documentContext
+        document_context: documentContext,
+        selected_range: selectedRange ? {
+          tag: selectedRange.tag,
+          text: selectedRange.text
+        } : null
       }),
     });
 
